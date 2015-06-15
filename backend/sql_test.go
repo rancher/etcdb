@@ -2,6 +2,8 @@ package backend
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -11,12 +13,28 @@ import (
 	"github.com/rancherio/etcdb/models"
 )
 
+func TestMain(m *testing.M) {
+	dbDriver = "postgres"
+	dbDataSource = "sslmode=disable database=etcd_test"
+	log.Println("Running PostgreSQL tests")
+	postgresResult := m.Run()
+
+	dbDriver = "mysql"
+	dbDataSource = "root@/etcd_test"
+	log.Println("Running MySQL tests")
+	mysqlResult := m.Run()
+
+	os.Exit(mysqlResult | postgresResult)
+}
+
+var dbDriver, dbDataSource string
+
 func testConn(t *testing.T) *SqlBackend {
-	store, err := New("postgres", "sslmode=disable database=etcd_test")
+	store, err := New(dbDriver, dbDataSource)
 	ok(t, err)
 	err = store.dropSchema()
 	ok(t, err)
-	err = store.createSchema(false)
+	err = store.CreateSchema()
 	ok(t, err)
 
 	return store
@@ -90,6 +108,7 @@ func TestFullCycle(t *testing.T) {
 	equals(t, "bar", node.Value)
 
 	prevNode, _, err = store.Delete("/foo", Always)
+	ok(t, err)
 
 	equals(t, "/foo", prevNode.Key)
 	equals(t, "bar", prevNode.Value)
@@ -160,6 +179,7 @@ func TestSet_PrevValue_Success(t *testing.T) {
 	ok(t, err)
 
 	node, prevNode, err := store.Set("/foo", "updated", PrevValue("original"))
+	ok(t, err)
 
 	equals(t, "/foo", node.Key)
 	equals(t, "updated", node.Value)
@@ -195,6 +215,7 @@ func TestSet_PrevIndex_Success(t *testing.T) {
 	ok(t, err)
 
 	node, prevNode, err := store.Set("/foo", "updated", PrevIndex(node.ModifiedIndex))
+	ok(t, err)
 
 	equals(t, "/foo", node.Key)
 	equals(t, "updated", node.Value)
@@ -263,6 +284,7 @@ func TestDelete_PrevIndex_Success(t *testing.T) {
 	ok(t, err)
 
 	prevNode, _, err := store.Delete("/foo", PrevIndex(node.ModifiedIndex))
+	ok(t, err)
 
 	equals(t, "/foo", prevNode.Key)
 	equals(t, "original", prevNode.Value)

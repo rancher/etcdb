@@ -4,34 +4,46 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 
-	"github.com/lib/pq"
+	"github.com/go-sql-driver/mysql"
 	"github.com/rancherio/etcdb/models"
 )
 
 // SqlBackend SQL implementation
 type SqlBackend struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect dbDialect
 }
 
 // New creates a SqlBackend for the DB
 func New(driver, dataSource string) (*SqlBackend, error) {
+	var dialect dbDialect
+	switch driver {
+	case "mysql":
+		dialect = mysqlDialect{}
+	case "postgres":
+		dialect = postgresDialect{}
+	default:
+		return nil, fmt.Errorf("Unrecognized database driver %s, should be 'mysql' or 'postgres'", driver)
+	}
+
 	db, err := sql.Open(driver, dataSource)
 	if err != nil {
 		return nil, err
 	}
-	return &SqlBackend{db}, nil
+	backend := &SqlBackend{db, dialect}
+	err = backend.dialect.init(db)
+	if err != nil {
+		backend.Close()
+		return nil, err
+	}
+
+	return backend, nil
 }
 
 func (b *SqlBackend) Close() error {
 	return b.db.Close()
-}
-
-// CreateSchema creates the DB schema
-func (b *SqlBackend) CreateSchema() error {
-	return b.createSchema(false)
 }
 
 func (b *SqlBackend) runQueries(queries ...string) error {
@@ -53,31 +65,15 @@ func (b *SqlBackend) dropSchema() error {
 	)
 }
 
-func (b *SqlBackend) createSchema(temp bool) error {
-	t := ""
-	if temp {
-		t = "TEMPORARY "
-	}
-	return b.runQueries(
-		"CREATE "+t+`TABLE "nodes" (
-	    "key" varchar(2048),
-	    "created" bigint NOT NULL,
-	    "modified" bigint NOT NULL,
-	    "value" text NOT NULL DEFAULT '',
-	    "ttl" integer,
-	    "expiration" timestamp,
-	    "dir" boolean NOT NULL DEFAULT 'false',
-			"path_depth" integer,
-	    PRIMARY KEY ("key")
-		)`,
+// CreateSchema creates the DB schema
+func (b *SqlBackend) CreateSchema() error {
+	queries := b.dialect.tableDefinitions()
+	queries = append(queries, `INSERT INTO "index" ("index") VALUES (0)`)
+	return b.runQueries(queries...)
+}
 
-		"CREATE "+t+`TABLE "index" (
-		    "index" bigint,
-		    PRIMARY KEY ("index")
-		)`,
-
-		`INSERT INTO "index" ("index") VALUES (0)`,
-	)
+func (b *SqlBackend) Query() *Query {
+	return &Query{dialect: b.dialect}
 }
 
 // Get returns a node for the key
@@ -100,15 +96,16 @@ func (b *SqlBackend) Get(key string, recursive bool) (node *models.Node, err err
 func (b *SqlBackend) get(tx *sql.Tx, key string, recursive bool) (*models.Node, error) {
 	// TODO compute "depth" field based on the # of directories
 	// in the path and can query for immediate descendents based on that
-	query := `SELECT key, created, modified, value, dir, ttl, expiration FROM nodes
-						WHERE key = $1 OR (key LIKE $1 || '/%'`
-	params := []interface{}{key}
+	query := b.Query().Extend(`
+		SELECT "key", "created", "modified", "value", "dir", "ttl", "expiration" FROM "nodes"
+		WHERE "key" = `, key, `
+		OR ("key" LIKE `)
+	b.dialect.concat(query, key, "/%")
 	if !recursive {
-		query = query + " AND path_depth = $2"
-		params = append(params, strings.Count(key, "/")+1)
+		query.Extend(" AND path_depth = ", strings.Count(key, "/")+1)
 	}
-	query = query + ")"
-	rows, err := tx.Query(query, params...)
+	query.Text(")")
+	rows, err := query.Query(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +146,8 @@ type scannable interface {
 
 func scanNode(scanner scannable) (*models.Node, error) {
 	var node models.Node
-	var expiration pq.NullTime
+	// mysql.NullTime is more portable and works with the Postgres driver
+	var expiration mysql.NullTime
 	err := scanner.Scan(&node.Key, &node.CreatedIndex, &node.ModifiedIndex,
 		&node.Value, &node.Dir, &node.TTL, &expiration)
 	if err != nil {
@@ -162,10 +160,9 @@ func scanNode(scanner scannable) (*models.Node, error) {
 }
 
 func (b *SqlBackend) getOne(tx *sql.Tx, key string) (*models.Node, error) {
-	node, err := scanNode(tx.QueryRow(`
-		SELECT key, created, modified, value, dir, ttl, expiration FROM nodes
-		WHERE key = $1
-		`, key))
+	node, err := scanNode(b.Query().Extend(`
+		SELECT "key", "created", "modified", "value", "dir", "ttl", "expiration" FROM "nodes"
+		WHERE "key" = `, key).QueryRow(tx))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -227,27 +224,34 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 
 	pathDepth := strings.Count(key, "/")
 
-	params := []interface{}{key, value, dir, index, pathDepth}
-	var query string
+	query := b.Query()
 
 	if prevNode == nil {
-		columns := `key, value, dir, created, modified, path_depth`
-		values := `$1, $2, $3, $4, $4, $5`
+		query.Text(`INSERT INTO nodes ("key", "value", "dir", "created", "modified", "path_depth"`)
 		if ttl != nil {
-			columns = columns + `, ttl, expiration`
-			values = values + `, $6, CURRENT_TIMESTAMP AT TIME ZONE 'UTC' + $7::INTERVAL`
-			params = append(params, *ttl, strconv.FormatInt(*ttl, 10))
+			query.Text(`, ttl, expiration`)
 		}
-		query = fmt.Sprintf(`INSERT INTO nodes (%s) VALUES (%s)`, columns, values)
+		query.Extend(`) VALUES (`,
+			key, `, `, value, `, `, dir, `, `, index, `, `, index, `, `, pathDepth,
+		)
+		if ttl != nil {
+			query.Extend(`, `, *ttl, `, `)
+			b.dialect.expiration(query, *ttl)
+		}
+		query.Text(")")
 	} else {
-		ttlClause := ""
+		query.Extend(`UPDATE nodes SET "value" = `, value, `, dir = `, dir,
+			`, modified = `, index, `, path_depth = `, pathDepth)
 		if ttl != nil {
-			ttlClause = `, ttl = $6, expiration = CURRENT_TIMESTAMP AT TIME ZONE 'UTC' + $7::INTERVAL`
-			params = append(params, *ttl, strconv.FormatInt(*ttl, 10))
+			query.Extend(
+				`, ttl = `, *ttl,
+				`, expiration = `,
+			)
+			b.dialect.expiration(query, *ttl)
 		}
-		query = `UPDATE nodes SET value = $2, dir = $3, modified = $4, path_depth = $5` + ttlClause + ` WHERE key = $1`
+		query.Extend(` WHERE "key" = `, key)
 	}
-	_, err = tx.Exec(query, params...)
+	_, err = query.Exec(tx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -267,26 +271,24 @@ func (b *SqlBackend) mkdirs(tx *sql.Tx, path string, index int64) error {
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(`
-			INSERT INTO nodes (key, dir, created, modified, path_depth)
-			VALUES ($1, true, $2, $2, $3)
-			`, path, index, pathDepth)
+		_, err = b.Query().Extend(`
+			INSERT INTO nodes ("key", "dir", "created", "modified", "path_depth")
+			VALUES (`, path, `, true, `, index, `, `, index, `, `, pathDepth, `)
+			`).Exec(tx)
 		if err != nil {
 			tx.Exec("ROLLBACK TO SAVEPOINT mkdirs")
 		}
-		if err, ok := err.(*pq.Error); ok {
-			if err.Code == "23505" { // duplicate key
-				var existingIsDir bool
-				err := tx.QueryRow(`SELECT dir FROM nodes WHERE key = $1`, path).Scan(&existingIsDir)
-				if err != nil {
-					return err
-				}
-				if !existingIsDir {
-					// FIXME should this be previous index before the update?
-					return models.NotADirectory(path, index)
-				}
-				return nil
+		if b.dialect.isDuplicateKeyError(err) {
+			var existingIsDir bool
+			err := b.Query().Extend(`SELECT dir FROM nodes WHERE "key" = `, path).QueryRow(tx).Scan(&existingIsDir)
+			if err != nil {
+				return err
 			}
+			if !existingIsDir {
+				// FIXME should this be previous index before the update?
+				return models.NotADirectory(path, index)
+			}
+			return nil
 		}
 		if err != nil {
 			return err
@@ -316,10 +318,9 @@ func (b *SqlBackend) CreateInOrder(key, value string) (node *models.Node, err er
 
 	key = fmt.Sprintf("%s/%d", key, index)
 
-	_, err = tx.Exec(`
-		INSERT INTO nodes (key, value, created, modified)
-		VALUES ($1, $2, $3, $3)
-		`, key, value, index)
+	_, err = b.Query().Extend(`
+		INSERT INTO nodes ("key", "value", "created", "modified")
+		VALUES (`, key, `, `, value, `, `, index, `, `, `)`).Exec(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -370,9 +371,9 @@ func (b *SqlBackend) Delete(key string, condition Condition) (node *models.Node,
 		return nil, 0, err
 	}
 
-	_, err = tx.Exec(`
-		DELETE FROM nodes WHERE key = $1
-		`, key)
+	_, err = b.Query().Extend(`
+		DELETE FROM nodes WHERE "key" =
+		`, key).Exec(tx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -420,9 +421,9 @@ func (b *SqlBackend) RmDir(key string, recursive bool, condition Condition) (nod
 		return nil, 0, err
 	}
 
-	_, err = tx.Exec(`
-		DELETE FROM nodes WHERE key = $1 OR key LIKE $1 || '/%'
-		`, key)
+	_, err = b.Query().Extend(`
+		DELETE FROM nodes WHERE "key" = `, key, ` OR "key" LIKE `, key, ` || '/%'
+		`).Exec(tx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -439,8 +440,5 @@ func splitKey(key string) string {
 }
 
 func (b *SqlBackend) incrementIndex(tx *sql.Tx) (index int64, err error) {
-	err = tx.QueryRow(`
-		UPDATE index SET index = index + 1 RETURNING index
-		`).Scan(&index)
-	return
+	return b.dialect.incrementIndex(tx)
 }
