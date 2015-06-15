@@ -76,9 +76,22 @@ func (b *SqlBackend) Query() *Query {
 	return &Query{dialect: b.dialect}
 }
 
+func (b *SqlBackend) Begin() (tx *sql.Tx, err error) {
+	tx, err = b.db.Begin()
+	if err != nil {
+		return
+	}
+	_, err = tx.Exec(`DELETE FROM "nodes" WHERE "expiration" < ` + b.dialect.now())
+	if err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	return
+}
+
 // Get returns a node for the key
 func (b *SqlBackend) Get(key string, recursive bool) (node *models.Node, err error) {
-	tx, err := b.db.Begin()
+	tx, err := b.Begin()
 	if err != nil {
 		return nil, err
 	}
@@ -96,10 +109,7 @@ func (b *SqlBackend) Get(key string, recursive bool) (node *models.Node, err err
 func (b *SqlBackend) get(tx *sql.Tx, key string, recursive bool) (*models.Node, error) {
 	// TODO compute "depth" field based on the # of directories
 	// in the path and can query for immediate descendents based on that
-	query := b.Query().Extend(`
-		SELECT "key", "created", "modified", "value", "dir", "ttl", "expiration" FROM "nodes"
-		WHERE "key" = `, key, `
-		OR ("key" LIKE `)
+	query := b.queryNode(key).Extend(` OR ("key" LIKE `)
 	b.dialect.concat(query, key, "/%")
 	if !recursive {
 		query.Extend(" AND path_depth = ", strings.Count(key, "/")+1)
@@ -149,7 +159,7 @@ func scanNode(scanner scannable) (*models.Node, error) {
 	// mysql.NullTime is more portable and works with the Postgres driver
 	var expiration mysql.NullTime
 	err := scanner.Scan(&node.Key, &node.CreatedIndex, &node.ModifiedIndex,
-		&node.Value, &node.Dir, &node.TTL, &expiration)
+		&node.Value, &node.Dir, &expiration, &node.TTL)
 	if err != nil {
 		return nil, err
 	}
@@ -159,10 +169,16 @@ func scanNode(scanner scannable) (*models.Node, error) {
 	return &node, nil
 }
 
+func (b *SqlBackend) queryNode(key string) *Query {
+	return b.Query().Text(`
+		SELECT "key", "created", "modified", "value", "dir", "expiration",
+		`).Text(b.dialect.ttl()).Extend(`
+		FROM "nodes"
+		WHERE "key" = `, key)
+}
+
 func (b *SqlBackend) getOne(tx *sql.Tx, key string) (*models.Node, error) {
-	node, err := scanNode(b.Query().Extend(`
-		SELECT "key", "created", "modified", "value", "dir", "ttl", "expiration" FROM "nodes"
-		WHERE "key" = `, key).QueryRow(tx))
+	node, err := scanNode(b.queryNode(key).QueryRow(tx))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -183,7 +199,7 @@ func (b *SqlBackend) MkDir(key string, condition Condition) (*models.Node, *mode
 }
 
 func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Condition) (node *models.Node, prevNode *models.Node, err error) {
-	tx, err := b.db.Begin()
+	tx, err := b.Begin()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -229,24 +245,25 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 	if prevNode == nil {
 		query.Text(`INSERT INTO nodes ("key", "value", "dir", "created", "modified", "path_depth"`)
 		if ttl != nil {
-			query.Text(`, ttl, expiration`)
+			query.Text(`, expiration`)
 		}
 		query.Extend(`) VALUES (`,
 			key, `, `, value, `, `, dir, `, `, index, `, `, index, `, `, pathDepth,
 		)
 		if ttl != nil {
-			query.Extend(`, `, *ttl, `, `)
+			query.Text(`, `)
 			b.dialect.expiration(query, *ttl)
 		}
 		query.Text(")")
 	} else {
 		query.Extend(`UPDATE nodes SET "value" = `, value, `, dir = `, dir,
 			`, modified = `, index, `, path_depth = `, pathDepth)
-		if ttl != nil {
-			query.Extend(
-				`, ttl = `, *ttl,
-				`, expiration = `,
+		if ttl == nil {
+			query.Text(
+				`, expiration = null`,
 			)
+		} else {
+			query.Text(`, expiration = `)
 			b.dialect.expiration(query, *ttl)
 		}
 		query.Extend(` WHERE "key" = `, key)
@@ -299,7 +316,7 @@ func (b *SqlBackend) mkdirs(tx *sql.Tx, path string, index int64) error {
 }
 
 func (b *SqlBackend) CreateInOrder(key, value string) (node *models.Node, err error) {
-	tx, err := b.db.Begin()
+	tx, err := b.Begin()
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +352,7 @@ func (b *SqlBackend) CreateInOrder(key, value string) (node *models.Node, err er
 
 // Delete removes the key
 func (b *SqlBackend) Delete(key string, condition Condition) (node *models.Node, index int64, err error) {
-	tx, err := b.db.Begin()
+	tx, err := b.Begin()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -383,7 +400,7 @@ func (b *SqlBackend) Delete(key string, condition Condition) (node *models.Node,
 
 // RmDir removes the key for directories
 func (b *SqlBackend) RmDir(key string, recursive bool, condition Condition) (node *models.Node, index int64, err error) {
-	tx, err := b.db.Begin()
+	tx, err := b.Begin()
 	if err != nil {
 		return nil, 0, err
 	}

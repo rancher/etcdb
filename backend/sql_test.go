@@ -598,6 +598,77 @@ func Test_TTL_SetsExpiration(t *testing.T) {
 	}
 }
 
+func Test_TTL_SetThenClear(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.SetTTL("/foo", "value", 100, Always)
+	ok(t, err)
+
+	node, err := store.Get("/foo", false)
+	ok(t, err)
+
+	equals(t, 100, *node.TTL)
+	if node.Expiration.IsZero() {
+		fatalf(t, "expected Expiration to have a non-zero value")
+	}
+
+	// Should clear the TTL
+	_, _, err = store.Set("/foo", "value", Always)
+
+	node, err = store.Get("/foo", false)
+	ok(t, err)
+
+	if node.TTL != nil {
+		fatalf(t, "expected TTL to be nil, but got: %d", *node.TTL)
+	}
+	if node.Expiration != nil {
+		fatalf(t, "expected Expiration to be nil, but got: %s", node.Expiration)
+	}
+}
+
+func Test_TTL_CountsDown(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.SetTTL("/foo", "value", 100, Always)
+	ok(t, err)
+
+	node, err := store.Get("/foo", false)
+	ok(t, err)
+	equals(t, 100, *node.TTL)
+
+	// MySQL only stores to 1-second precision, so sleep long enough
+	// to make sure there's no chance of truncation error
+	time.Sleep(2 * time.Second)
+
+	node, err = store.Get("/foo", false)
+	ok(t, err)
+
+	if !(*node.TTL < 100) {
+		fatalf(t, "expected TTL to have decreased, but got: %d", *node.TTL)
+	}
+}
+
+func Test_TTL_NodeExpires(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.SetTTL("/foo", "value", 1, Always)
+	ok(t, err)
+
+	node, err := store.Get("/foo", false)
+	ok(t, err)
+	equals(t, 1, *node.TTL)
+
+	// MySQL only stores to 1-second precision, so sleep long enough
+	// to make sure there's no chance of truncation error
+	time.Sleep(2 * time.Second)
+
+	_, err = store.Get("/foo", false)
+	expectError(t, "Key not found", "/foo", err)
+}
+
 func fatalf(tb testing.TB, format string, args ...interface{}) {
 	fatalfLvl(1, tb, format, args...)
 }
@@ -610,12 +681,12 @@ func fatalfLvl(lvl int, tb testing.TB, format string, args ...interface{}) {
 }
 
 func expectError(tb testing.TB, message, cause string, err error) {
-	if err, ok := err.(models.Error); ok {
-		if err.Message != message {
-			fatalfLvl(1, tb, "\n\n\texpected Message: %#v\n\n\tgot: %#v", message, err.Message)
+	if modelError, ok := err.(models.Error); ok {
+		if modelError.Message != message {
+			fatalfLvl(1, tb, "\n\n\texpected Message: %#v\n\n\tgot: %#v", message, modelError.Message)
 		}
-		if err.Cause != cause {
-			fatalfLvl(1, tb, "\n\n\texpected Cause: %#v\n\n\tgot: %#v", cause, err.Cause)
+		if modelError.Cause != cause {
+			fatalfLvl(1, tb, "\n\n\texpected Cause: %#v\n\n\tgot: %#v", cause, modelError.Cause)
 		}
 	} else {
 		fatalfLvl(1, tb, "expected models.Error, but got %T %#v", err, err)
