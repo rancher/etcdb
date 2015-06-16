@@ -40,12 +40,26 @@ func testConn(t *testing.T) *SqlBackend {
 	return store
 }
 
+func currIndex(store *SqlBackend) int64 {
+	index, _ := store.currIndex(store.db)
+	return index
+}
+
 func TestGetMissingReturnsNotFound(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
 	_, err := store.Get("/foo", false)
 	expectError(t, "Key not found", "/foo", err)
+}
+
+func Test_Get_NotFoundErrorIncludesIndex(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, err := store.Get("/bar", false)
+	expectError(t, "Key not found", "/bar", err)
+	equals(t, currIndex(store), err.(models.Error).Index)
 }
 
 func TestSet(t *testing.T) {
@@ -118,6 +132,26 @@ func TestFullCycle(t *testing.T) {
 	if node != nil {
 		fatalf(t, "node should be nil after deleting")
 	}
+}
+
+func TestSet_ErrorIndex(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	origIndex, err := store.incrementIndex(store.db)
+	ok(t, err)
+
+	// ensure the index update is persisted
+	equals(t, origIndex, currIndex(store))
+
+	_, _, err = store.Set("/foo", "updated", PrevExist(true))
+	expectError(t, "Key not found", "/foo", err)
+
+	// the index should not be updated by the failed set
+	equals(t, origIndex, currIndex(store))
+
+	// the error should contain the current index
+	equals(t, origIndex, err.(models.Error).Index)
 }
 
 func TestSet_PrevExist_True_Success(t *testing.T) {
@@ -241,6 +275,26 @@ func TestSet_PrevIndex_Fail_IndexMismatch(t *testing.T) {
 
 	_, _, err = store.Set("/foo", "updated", PrevIndex(100))
 	expectError(t, "Compare failed", "[100 != 1]", err)
+}
+
+func TestDelete_ErrorIndex(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	origIndex, err := store.incrementIndex(store.db)
+	ok(t, err)
+
+	// ensure the index update is persisted
+	equals(t, origIndex, currIndex(store))
+
+	_, _, err = store.Delete("/foo", Always)
+	expectError(t, "Key not found", "/foo", err)
+
+	// the index should not be updated by the failed delete
+	equals(t, origIndex, currIndex(store))
+
+	// the error should contain the current index
+	equals(t, origIndex, err.(models.Error).Index)
 }
 
 func TestDelete_PrevValue_Success(t *testing.T) {
@@ -541,6 +595,14 @@ func Test_RmDir_CanRemoveFile(t *testing.T) {
 	expectError(t, "Key not found", "/foo", err)
 }
 
+func Test_RmDir_MissingKey(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.RmDir("/foo", false, Always)
+	expectError(t, "Key not found", "/foo", err)
+}
+
 func Test_RmDir_CanRemoveEmptyDirectory(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
@@ -561,6 +623,14 @@ func Test_RmDir_DoesNotRemoveNonEmptyDirectory(t *testing.T) {
 
 	_, _, err = store.RmDir("/foo", false, Always)
 	expectError(t, "Directory not empty", "/foo", err)
+
+	node, err := store.Get("/foo", false)
+	ok(t, err)
+	equals(t, true, node.Dir)
+
+	node, err = store.Get("/foo/bar", false)
+	ok(t, err)
+	equals(t, "value", node.Value)
 }
 
 func Test_RmDir_Recursive(t *testing.T) {
@@ -578,6 +648,26 @@ func Test_RmDir_Recursive(t *testing.T) {
 
 	_, err = store.Get("/foo/bar", false)
 	expectError(t, "Key not found", "/foo/bar", err)
+}
+
+func Test_RmDir_ErrorIndex(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	origIndex, err := store.incrementIndex(store.db)
+	ok(t, err)
+
+	// ensure the index update is persisted
+	equals(t, origIndex, currIndex(store))
+
+	_, _, err = store.RmDir("/foo", false, Always)
+	expectError(t, "Key not found", "/foo", err)
+
+	// the index should not be updated by the failed rmdir
+	equals(t, origIndex, currIndex(store))
+
+	// the error should contain the current index
+	equals(t, origIndex, err.(models.Error).Index)
 }
 
 func Test_TTL_SetsExpiration(t *testing.T) {

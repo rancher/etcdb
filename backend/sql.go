@@ -103,12 +103,6 @@ func (b *SqlBackend) Get(key string, recursive bool) (node *models.Node, err err
 		}
 	}()
 
-	return b.get(tx, key, recursive)
-}
-
-func (b *SqlBackend) get(tx *sql.Tx, key string, recursive bool) (*models.Node, error) {
-	// TODO compute "depth" field based on the # of directories
-	// in the path and can query for immediate descendents based on that
 	query := b.queryNode(key).Extend(` OR ("key" LIKE `)
 	b.dialect.concat(query, key, "/%")
 	if !recursive {
@@ -121,9 +115,6 @@ func (b *SqlBackend) get(tx *sql.Tx, key string, recursive bool) (*models.Node, 
 	}
 	defer rows.Close()
 
-	// FIXME
-	currIndex := int64(0)
-
 	nodes := make(map[string]*models.Node)
 
 	for rows.Next() {
@@ -135,6 +126,10 @@ func (b *SqlBackend) get(tx *sql.Tx, key string, recursive bool) (*models.Node, 
 	}
 
 	if _, ok := nodes[key]; !ok {
+		currIndex, err := b.currIndex(tx)
+		if err != nil {
+			return nil, err
+		}
 		return nil, models.NotFound(key, currIndex)
 	}
 
@@ -211,26 +206,25 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 		}
 	}()
 
-	// TODO select for update?
+	index, err := b.incrementIndex(tx)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	prevNode, err = b.getOne(tx, key)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	currIndex := int64(0)
+	prevIndex := index - 1
 
-	if err := condition.Check(key, currIndex, prevNode); err != nil {
+	if err := condition.Check(key, prevIndex, prevNode); err != nil {
 		return nil, nil, err
 	}
 
 	if prevNode != nil && prevNode.Dir {
 		// XXX is this index the new, or previous index?
-		return nil, nil, models.NotAFile(key, currIndex)
-	}
-
-	index, err := b.incrementIndex(tx)
-	if err != nil {
-		return nil, nil, err
+		return nil, nil, models.NotAFile(key, prevIndex)
 	}
 
 	err = b.mkdirs(tx, splitKey(key), index)
@@ -367,27 +361,26 @@ func (b *SqlBackend) Delete(key string, condition Condition) (node *models.Node,
 		}
 	}()
 
+	index, err = b.incrementIndex(tx)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	node, err = b.getOne(tx, key)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	// XXX
-	currIndex := int64(0)
+	prevIndex := index - 1
 
 	if node == nil {
-		return nil, 0, models.NotFound(key, currIndex)
+		return nil, 0, models.NotFound(key, prevIndex)
 	}
 	if node.Dir {
-		return nil, 0, models.NotAFile(key, currIndex)
+		return nil, 0, models.NotAFile(key, prevIndex)
 	}
 
-	if err := condition.Check(key, currIndex, node); err != nil {
-		return nil, 0, err
-	}
-
-	index, err = b.incrementIndex(tx)
-	if err != nil {
+	if err := condition.Check(key, prevIndex, node); err != nil {
 		return nil, 0, err
 	}
 
@@ -415,38 +408,43 @@ func (b *SqlBackend) RmDir(key string, recursive bool, condition Condition) (nod
 		}
 	}()
 
-	node, err = b.get(tx, key, false)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// XXX
-	currIndex := int64(0)
-
-	if node == nil {
-		return nil, 0, models.NotFound(key, currIndex)
-	}
-	// TODO can we get the count of deleted nodes instead, and roll back if deleting
-	// more than one?
-	if !recursive && len(node.Nodes) > 0 {
-		return nil, 0, models.DirectoryNotEmpty(key, currIndex)
-	}
-
-	if err := condition.Check(key, currIndex, node); err != nil {
-		return nil, 0, err
-	}
-
 	index, err = b.incrementIndex(tx)
 	if err != nil {
+		return nil, 0, err
+	}
+
+	// use the previous index in any errors
+	prevIndex := index - 1
+
+	node, err = b.getOne(tx, key)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if node == nil {
+		return nil, 0, models.NotFound(key, prevIndex)
+	}
+
+	if err := condition.Check(key, prevIndex, node); err != nil {
 		return nil, 0, err
 	}
 
 	query := b.Query().Extend(`
 		DELETE FROM nodes WHERE "key" = `, key, ` OR "key" LIKE `)
 	b.dialect.concat(query, key, "/%")
-	_, err = query.Exec(tx)
+	res, err := query.Exec(tx)
 	if err != nil {
 		return nil, 0, err
+	}
+
+	if !recursive {
+		rowsDeleted, err := res.RowsAffected()
+		if err != nil {
+			return nil, 0, err
+		}
+		if rowsDeleted > 1 {
+			return nil, 0, models.DirectoryNotEmpty(key, prevIndex)
+		}
 	}
 
 	return node, index, nil
@@ -460,6 +458,11 @@ func splitKey(key string) string {
 	return key[:i]
 }
 
-func (b *SqlBackend) incrementIndex(tx *sql.Tx) (index int64, err error) {
-	return b.dialect.incrementIndex(tx)
+func (b *SqlBackend) currIndex(db Querier) (index int64, err error) {
+	err = db.QueryRow(`SELECT "index" FROM "index"`).Scan(&index)
+	return
+}
+
+func (b *SqlBackend) incrementIndex(db Querier) (index int64, err error) {
+	return b.dialect.incrementIndex(db)
 }
