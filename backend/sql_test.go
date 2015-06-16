@@ -587,7 +587,7 @@ func Test_TTL_SetsExpiration(t *testing.T) {
 	node, err := store.Get("/foo", false)
 	ok(t, err)
 
-	equals(t, 100, *node.TTL)
+	equals(t, int64(100), *node.TTL)
 	if node.Expiration.IsZero() {
 		fatalf(t, "expected Expiration to have a non-zero value")
 	}
@@ -608,7 +608,7 @@ func Test_TTL_SetThenClear(t *testing.T) {
 	node, err := store.Get("/foo", false)
 	ok(t, err)
 
-	equals(t, 100, *node.TTL)
+	equals(t, int64(100), *node.TTL)
 	if node.Expiration.IsZero() {
 		fatalf(t, "expected Expiration to have a non-zero value")
 	}
@@ -636,7 +636,7 @@ func Test_TTL_CountsDown(t *testing.T) {
 
 	node, err := store.Get("/foo", false)
 	ok(t, err)
-	equals(t, 100, *node.TTL)
+	equals(t, int64(100), *node.TTL)
 
 	// MySQL only stores to 1-second precision, so sleep long enough
 	// to make sure there's no chance of truncation error
@@ -659,7 +659,7 @@ func Test_TTL_NodeExpires(t *testing.T) {
 
 	node, err := store.Get("/foo", false)
 	ok(t, err)
-	equals(t, 1, *node.TTL)
+	equals(t, int64(1), *node.TTL)
 
 	// MySQL only stores to 1-second precision, so sleep long enough
 	// to make sure there's no chance of truncation error
@@ -667,6 +667,40 @@ func Test_TTL_NodeExpires(t *testing.T) {
 
 	_, err = store.Get("/foo", false)
 	expectError(t, "Key not found", "/foo", err)
+}
+
+func Test_CreateInOrder(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	node1, err := store.CreateInOrder("/foo", "value", nil)
+	ok(t, err)
+
+	equals(t, int64(1), node1.CreatedIndex)
+	equals(t, "/foo/1", node1.Key)
+	equals(t, "value", node1.Value)
+
+	node2, err := store.CreateInOrder("/foo", "value", nil)
+	ok(t, err)
+
+	equals(t, int64(2), node2.CreatedIndex)
+	equals(t, "/foo/2", node2.Key)
+	equals(t, "value", node2.Value)
+}
+
+func Test_CreateInOrder_TTL(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	ttl := int64(100)
+	node, err := store.CreateInOrder("/foo", "value", &ttl)
+	ok(t, err)
+
+	equals(t, "/foo/1", node.Key)
+	equals(t, ttl, *node.TTL)
+	if node.Expiration.IsZero() {
+		fatalf(t, "expected Expiration to have a non-zero value")
+	}
 }
 
 func fatalf(tb testing.TB, format string, args ...interface{}) {

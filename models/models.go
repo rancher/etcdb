@@ -22,7 +22,7 @@ type Node struct {
 	CreatedIndex  int64      `json:"createdIndex"`
 	ModifiedIndex int64      `json:"modifiedIndex"`
 	Dir           bool       `json:"dir"`
-	TTL           *int       `json:"ttl,omitempty"`
+	TTL           *int64     `json:"ttl,omitempty"`
 	Expiration    *time.Time `json:"expiration,omitempty"`
 	Nodes         []*Node    `json:"nodes,omitempty"`
 }

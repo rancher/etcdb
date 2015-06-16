@@ -238,26 +238,13 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 		return nil, nil, err
 	}
 
-	pathDepth := strings.Count(key, "/")
-
-	query := b.Query()
+	var query *Query
 
 	if prevNode == nil {
-		query.Text(`INSERT INTO nodes ("key", "value", "dir", "created", "modified", "path_depth"`)
-		if ttl != nil {
-			query.Text(`, expiration`)
-		}
-		query.Extend(`) VALUES (`,
-			key, `, `, value, `, `, dir, `, `, index, `, `, index, `, `, pathDepth,
-		)
-		if ttl != nil {
-			query.Text(`, `)
-			b.dialect.expiration(query, *ttl)
-		}
-		query.Text(")")
+		query = b.insertQuery(key, value, dir, index, ttl)
 	} else {
-		query.Extend(`UPDATE nodes SET "value" = `, value, `, dir = `, dir,
-			`, modified = `, index, `, path_depth = `, pathDepth)
+		query = b.Query().Extend(`UPDATE nodes SET "value" = `, value, `, dir = `, dir,
+			`, modified = `, index, `, path_depth = `, strings.Count(key, "/"))
 		if ttl == nil {
 			query.Text(
 				`, expiration = null`,
@@ -279,6 +266,24 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 	}
 
 	return node, prevNode, nil
+}
+
+func (b *SqlBackend) insertQuery(key, value string, dir bool, index int64, ttl *int64) *Query {
+	pathDepth := strings.Count(key, "/")
+	query := b.Query()
+	query.Text(`INSERT INTO nodes ("key", "value", "dir", "created", "modified", "path_depth"`)
+	if ttl != nil {
+		query.Text(`, expiration`)
+	}
+	query.Extend(`) VALUES (`,
+		key, `, `, value, `, `, dir, `, `, index, `, `, index, `, `, pathDepth,
+	)
+	if ttl != nil {
+		query.Text(`, `)
+		b.dialect.expiration(query, *ttl)
+	}
+	query.Text(")")
+	return query
 }
 
 func (b *SqlBackend) mkdirs(tx *sql.Tx, path string, index int64) error {
@@ -315,7 +320,7 @@ func (b *SqlBackend) mkdirs(tx *sql.Tx, path string, index int64) error {
 	return nil
 }
 
-func (b *SqlBackend) CreateInOrder(key, value string) (node *models.Node, err error) {
+func (b *SqlBackend) CreateInOrder(key, value string, ttl *int64) (node *models.Node, err error) {
 	tx, err := b.Begin()
 	if err != nil {
 		return nil, err
@@ -335,9 +340,7 @@ func (b *SqlBackend) CreateInOrder(key, value string) (node *models.Node, err er
 
 	key = fmt.Sprintf("%s/%d", key, index)
 
-	_, err = b.Query().Extend(`
-		INSERT INTO nodes ("key", "value", "created", "modified")
-		VALUES (`, key, `, `, value, `, `, index, `, `, `)`).Exec(tx)
+	_, err = b.insertQuery(key, value, false, index, ttl).Exec(tx)
 	if err != nil {
 		return nil, err
 	}

@@ -20,7 +20,7 @@ func (op *CreateInOrderNode) Params() interface{} {
 
 func (op *CreateInOrderNode) Call() (interface{}, error) {
 	// TODO TTL support
-	node, err := op.Store.CreateInOrder(op.params.Key, op.params.Value)
+	node, err := op.Store.CreateInOrder(op.params.Key, op.params.Value, op.params.TTL)
 	if err != nil {
 		return nil, err
 	}
