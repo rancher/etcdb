@@ -441,9 +441,10 @@ func (b *SqlBackend) RmDir(key string, recursive bool, condition Condition) (nod
 		return nil, 0, err
 	}
 
-	_, err = b.Query().Extend(`
-		DELETE FROM nodes WHERE "key" = `, key, ` OR "key" LIKE `, key, ` || '/%'
-		`).Exec(tx)
+	query := b.Query().Extend(`
+		DELETE FROM nodes WHERE "key" = `, key, ` OR "key" LIKE `)
+	b.dialect.concat(query, key, "/%")
+	_, err = query.Exec(tx)
 	if err != nil {
 		return nil, 0, err
 	}

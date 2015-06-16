@@ -575,6 +575,9 @@ func Test_RmDir_Recursive(t *testing.T) {
 
 	_, err = store.Get("/foo", false)
 	expectError(t, "Key not found", "/foo", err)
+
+	_, err = store.Get("/foo/bar", false)
+	expectError(t, "Key not found", "/foo/bar", err)
 }
 
 func Test_TTL_SetsExpiration(t *testing.T) {
