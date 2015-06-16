@@ -61,6 +61,10 @@ func KeyExists(key string, index int64) Error {
 	return Error{105, "Key already exists", key, index}
 }
 
+func RootReadOnly(index int64) Error {
+	return Error{107, "Root is read only", "/", index}
+}
+
 func DirectoryNotEmpty(key string, index int64) Error {
 	return Error{108, "Directory not empty", key, index}
 }

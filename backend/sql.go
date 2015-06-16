@@ -103,12 +103,19 @@ func (b *SqlBackend) Get(key string, recursive bool) (node *models.Node, err err
 		}
 	}()
 
-	query := b.queryNode(key).Extend(` OR ("key" LIKE `)
-	b.dialect.concat(query, key, "/%")
-	if !recursive {
-		query.Extend(" AND path_depth = ", strings.Count(key, "/")+1)
+	query := b.queryNode()
+	if key == "/" {
+		if !recursive {
+			query.Text(` WHERE path_depth = 1`)
+		}
+	} else {
+		query.Extend(` WHERE "key" = `, key, ` OR ("key" LIKE `)
+		b.dialect.concat(query, key, "/%")
+		if !recursive {
+			query.Extend(" AND path_depth = ", pathDepth(key)+1)
+		}
+		query.Text(")")
 	}
-	query.Text(")")
 	rows, err := query.Query(tx)
 	if err != nil {
 		return nil, err
@@ -125,6 +132,10 @@ func (b *SqlBackend) Get(key string, recursive bool) (node *models.Node, err err
 		nodes[node.Key] = node
 	}
 
+	if key == "/" {
+		nodes["/"] = &models.Node{Dir: true}
+	}
+
 	if _, ok := nodes[key]; !ok {
 		currIndex, err := b.currIndex(tx)
 		if err != nil {
@@ -134,8 +145,8 @@ func (b *SqlBackend) Get(key string, recursive bool) (node *models.Node, err err
 	}
 
 	for _, node := range nodes {
-		if node.Key == key {
-			// don't need to compute parent of the requested key
+		if node.Key == key || node.Key == "" {
+			// don't need to compute parent of the requested key, or root key
 			continue
 		}
 		parent := nodes[splitKey(node.Key)]
@@ -164,16 +175,15 @@ func scanNode(scanner scannable) (*models.Node, error) {
 	return &node, nil
 }
 
-func (b *SqlBackend) queryNode(key string) *Query {
+func (b *SqlBackend) queryNode() *Query {
 	return b.Query().Text(`
 		SELECT "key", "created", "modified", "value", "dir", "expiration",
 		`).Text(b.dialect.ttl()).Extend(`
-		FROM "nodes"
-		WHERE "key" = `, key)
+		FROM "nodes"`)
 }
 
 func (b *SqlBackend) getOne(tx *sql.Tx, key string) (*models.Node, error) {
-	node, err := scanNode(b.queryNode(key).QueryRow(tx))
+	node, err := scanNode(b.queryNode().Extend(` WHERE "key" = `, key).QueryRow(tx))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -193,7 +203,19 @@ func (b *SqlBackend) MkDir(key string, condition Condition) (*models.Node, *mode
 	return b.set(key, "", true, nil, condition)
 }
 
+func (b *SqlBackend) readOnlyError() error {
+	index, err := b.currIndex(b.db)
+	if err != nil {
+		return err
+	}
+	return models.RootReadOnly(index)
+}
+
 func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Condition) (node *models.Node, prevNode *models.Node, err error) {
+	if key == "/" {
+		return nil, nil, b.readOnlyError()
+	}
+
 	tx, err := b.Begin()
 	if err != nil {
 		return nil, nil, err
@@ -238,7 +260,7 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 		query = b.insertQuery(key, value, dir, index, ttl)
 	} else {
 		query = b.Query().Extend(`UPDATE nodes SET "value" = `, value, `, dir = `, dir,
-			`, modified = `, index, `, path_depth = `, strings.Count(key, "/"))
+			`, modified = `, index, `, path_depth = `, pathDepth(key))
 		if ttl == nil {
 			query.Text(
 				`, expiration = null`,
@@ -263,7 +285,7 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 }
 
 func (b *SqlBackend) insertQuery(key, value string, dir bool, index int64, ttl *int64) *Query {
-	pathDepth := strings.Count(key, "/")
+	pathDepth := pathDepth(key)
 	query := b.Query()
 	query.Text(`INSERT INTO nodes ("key", "value", "dir", "created", "modified", "path_depth"`)
 	if ttl != nil {
@@ -281,7 +303,7 @@ func (b *SqlBackend) insertQuery(key, value string, dir bool, index int64, ttl *
 }
 
 func (b *SqlBackend) mkdirs(tx *sql.Tx, path string, index int64) error {
-	pathDepth := strings.Count(path, "/")
+	pathDepth := pathDepth(path)
 	for ; path != "/" && path != ""; path = splitKey(path) {
 		_, err := tx.Exec("SAVEPOINT mkdirs")
 		if err != nil {
@@ -349,6 +371,10 @@ func (b *SqlBackend) CreateInOrder(key, value string, ttl *int64) (node *models.
 
 // Delete removes the key
 func (b *SqlBackend) Delete(key string, condition Condition) (node *models.Node, index int64, err error) {
+	if key == "/" {
+		return nil, 0, b.readOnlyError()
+	}
+
 	tx, err := b.Begin()
 	if err != nil {
 		return nil, 0, err
@@ -396,6 +422,10 @@ func (b *SqlBackend) Delete(key string, condition Condition) (node *models.Node,
 
 // RmDir removes the key for directories
 func (b *SqlBackend) RmDir(key string, recursive bool, condition Condition) (node *models.Node, index int64, err error) {
+	if key == "/" {
+		return nil, 0, b.readOnlyError()
+	}
+
 	tx, err := b.Begin()
 	if err != nil {
 		return nil, 0, err
@@ -455,6 +485,12 @@ func splitKey(key string) string {
 	for i >= 0 && key[i] != '/' {
 		i--
 	}
+	if i < 0 {
+		return ""
+	}
+	if i == 0 {
+		return "/"
+	}
 	return key[:i]
 }
 
@@ -465,4 +501,11 @@ func (b *SqlBackend) currIndex(db Querier) (index int64, err error) {
 
 func (b *SqlBackend) incrementIndex(db Querier) (index int64, err error) {
 	return b.dialect.incrementIndex(db)
+}
+
+func pathDepth(key string) int {
+	if key == "/" {
+		return 0
+	}
+	return strings.Count(key, "/")
 }

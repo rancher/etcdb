@@ -62,6 +62,87 @@ func Test_Get_NotFoundErrorIncludesIndex(t *testing.T) {
 	equals(t, currIndex(store), err.(models.Error).Index)
 }
 
+func Test_Get_RootEmpty(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	node, err := store.Get("/", false)
+	ok(t, err)
+
+	// etcd omits the key for the root node
+	equals(t, "", node.Key)
+	equals(t, true, node.Dir)
+	equals(t, 0, len(node.Nodes))
+}
+
+func Test_Get_RootChildren(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.Set("/foo", "bar", Always)
+	ok(t, err)
+
+	node, err := store.Get("/", false)
+	ok(t, err)
+
+	// etcd omits the key for the root node
+	equals(t, "", node.Key)
+	equals(t, true, node.Dir)
+	equals(t, 1, len(node.Nodes))
+
+	child := node.Nodes[0]
+	equals(t, "/foo", child.Key)
+	equals(t, "bar", child.Value)
+}
+
+func Test_Set_RootReadOnly(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.Set("/", "bar", Always)
+	expectError(t, "Root is read only", "/", err)
+}
+
+func Test_SetTTL_RootReadOnly(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.SetTTL("/", "bar", 100, Always)
+	expectError(t, "Root is read only", "/", err)
+}
+
+func Test_MkDir_RootReadOnly(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.MkDir("/", Always)
+	expectError(t, "Root is read only", "/", err)
+}
+
+func Test_Delete_RootReadOnly(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.Delete("/", Always)
+	expectError(t, "Root is read only", "/", err)
+}
+
+func Test_RmDir_RootReadOnly_NonRecursive(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.RmDir("/", false, Always)
+	expectError(t, "Root is read only", "/", err)
+}
+
+func Test_RmDir_RootReadOnly_Recursive(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	_, _, err := store.RmDir("/", true, Always)
+	expectError(t, "Root is read only", "/", err)
+}
+
 func TestSet(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
