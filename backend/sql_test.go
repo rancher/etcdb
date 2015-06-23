@@ -115,7 +115,7 @@ func Test_MkDir_RootReadOnly(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
-	_, _, err := store.MkDir("/", Always)
+	_, _, err := store.MkDir("/", nil, Always)
 	expectError(t, "Root is read only", "/", err)
 }
 
@@ -448,7 +448,7 @@ func Test_CreateDirectory_Simple(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
-	_, _, err := store.MkDir("/foo", Always)
+	_, _, err := store.MkDir("/foo", nil, Always)
 	ok(t, err)
 
 	node, err := store.Get("/foo", false)
@@ -465,7 +465,7 @@ func Test_CreateDirectory_ReplacesFile(t *testing.T) {
 	_, _, err := store.Set("/foo", "original", Always)
 	ok(t, err)
 
-	node, prevNode, err := store.MkDir("/foo", Always)
+	node, prevNode, err := store.MkDir("/foo", nil, Always)
 	ok(t, err)
 
 	equals(t, true, node.Dir)
@@ -477,10 +477,10 @@ func Test_CreateDirectory_DoesNotReplaceDir(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
-	_, _, err := store.MkDir("/foo", Always)
+	_, _, err := store.MkDir("/foo", nil, Always)
 	ok(t, err)
 
-	_, _, err = store.MkDir("/foo", Always)
+	_, _, err = store.MkDir("/foo", nil, Always)
 	expectError(t, "Not a file", "/foo", err)
 }
 
@@ -488,10 +488,10 @@ func Test_CreateDirectory_IfNotExist(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
-	_, _, err := store.MkDir("/foo", Always)
+	_, _, err := store.MkDir("/foo", nil, Always)
 	ok(t, err)
 
-	_, _, err = store.MkDir("/foo", PrevExist(false))
+	_, _, err = store.MkDir("/foo", nil, PrevExist(false))
 	expectError(t, "Key already exists", "/foo", err)
 }
 
@@ -499,7 +499,7 @@ func Test_Get_ListDirectory(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
-	_, _, err := store.MkDir("/foo", Always)
+	_, _, err := store.MkDir("/foo", nil, Always)
 	ok(t, err)
 
 	_, _, err = store.Set("/foo/bar", "value", Always)
@@ -519,10 +519,10 @@ func Test_Get_ListDirectory_NotRecursive(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
-	_, _, err := store.MkDir("/foo", Always)
+	_, _, err := store.MkDir("/foo", nil, Always)
 	ok(t, err)
 
-	_, _, err = store.MkDir("/foo/bar", Always)
+	_, _, err = store.MkDir("/foo/bar", nil, Always)
 	ok(t, err)
 
 	_, _, err = store.Set("/foo/bar/baz", "value", Always)
@@ -545,10 +545,10 @@ func Test_Get_ListDirectory_Recursive(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
-	_, _, err := store.MkDir("/foo", Always)
+	_, _, err := store.MkDir("/foo", nil, Always)
 	ok(t, err)
 
-	_, _, err = store.MkDir("/foo/bar", Always)
+	_, _, err = store.MkDir("/foo/bar", nil, Always)
 	ok(t, err)
 
 	_, _, err = store.Set("/foo/bar/baz", "value", Always)
@@ -646,7 +646,7 @@ func Test_MkDir_DoesNotOverwriteParentFile(t *testing.T) {
 	_, _, err := store.Set("/foo", "value", Always)
 	ok(t, err)
 
-	_, _, err = store.MkDir("/foo/bar", Always)
+	_, _, err = store.MkDir("/foo/bar", nil, Always)
 	expectError(t, "Not a directory", "/foo", err)
 }
 
@@ -654,7 +654,7 @@ func Test_Delete_DoesNotRemoveDirectory(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
-	_, _, err := store.MkDir("/foo", Always)
+	_, _, err := store.MkDir("/foo", nil, Always)
 	ok(t, err)
 
 	_, _, err = store.Delete("/foo", Always)
@@ -688,7 +688,7 @@ func Test_RmDir_CanRemoveEmptyDirectory(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
 
-	_, _, err := store.MkDir("/foo", Always)
+	_, _, err := store.MkDir("/foo", nil, Always)
 	ok(t, err)
 
 	_, _, err = store.RmDir("/foo", false, Always)
@@ -772,6 +772,31 @@ func Test_TTL_SetsExpiration(t *testing.T) {
 	}
 }
 
+func Test_TTL_MkDir(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	ttl := int64(100)
+
+	_, _, err := store.MkDir("/foo", &ttl, Always)
+	ok(t, err)
+
+	node, err := store.Get("/foo", false)
+	ok(t, err)
+
+	equals(t, true, node.Dir)
+
+	equals(t, ttl, *node.TTL)
+	if node.Expiration.IsZero() {
+		fatalf(t, "expected Expiration to have a non-zero value")
+	}
+
+	diff := node.Expiration.Sub(time.Now().UTC())
+	if diff.Seconds() > 110 || diff.Seconds() < 90 {
+		fatalf(t, "expected Expiration to occur in ~100s, but got: %d", diff)
+	}
+}
+
 func Test_TTL_SetThenClear(t *testing.T) {
 	store := testConn(t)
 	defer store.Close()
@@ -841,6 +866,52 @@ func Test_TTL_NodeExpires(t *testing.T) {
 
 	_, err = store.Get("/foo", false)
 	expectError(t, "Key not found", "/foo", err)
+}
+
+func Test_TTL_DirExpiresEmpty(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	ttl := int64(1)
+
+	_, _, err := store.MkDir("/foo", &ttl, Always)
+	ok(t, err)
+
+	node, err := store.Get("/foo", false)
+	ok(t, err)
+	equals(t, int64(1), *node.TTL)
+	equals(t, true, node.Dir)
+
+	// MySQL only stores to 1-second precision, so sleep long enough
+	// to make sure there's no chance of truncation error
+	time.Sleep(2 * time.Second)
+
+	_, err = store.Get("/foo", false)
+	expectError(t, "Key not found", "/foo", err)
+}
+
+func Test_TTL_DirExpiresChildren(t *testing.T) {
+	store := testConn(t)
+	defer store.Close()
+
+	ttl := int64(1)
+
+	_, _, err := store.MkDir("/foo", &ttl, Always)
+	ok(t, err)
+
+	_, _, err = store.Set("/foo/bar", "bar", Always)
+	ok(t, err)
+
+	node, err := store.Get("/foo/bar", false)
+	ok(t, err)
+	equals(t, "bar", node.Value)
+
+	// MySQL only stores to 1-second precision, so sleep long enough
+	// to make sure there's no chance of truncation error
+	time.Sleep(2 * time.Second)
+
+	_, err = store.Get("/foo/bar", false)
+	expectError(t, "Key not found", "/foo/bar", err)
 }
 
 func Test_CreateInOrder(t *testing.T) {

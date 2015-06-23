@@ -77,16 +77,67 @@ func (b *SqlBackend) Query() *Query {
 }
 
 func (b *SqlBackend) Begin() (tx *sql.Tx, err error) {
-	tx, err = b.db.Begin()
+	err = b.purgeExpired()
 	if err != nil {
 		return
 	}
-	_, err = tx.Exec(`DELETE FROM "nodes" WHERE "expiration" < ` + b.dialect.now())
+
+	return b.db.Begin()
+}
+
+func (b *SqlBackend) purgeExpired() (err error) {
+	tx, err := b.db.Begin()
 	if err != nil {
-		tx.Rollback()
-		return nil, err
+		return err
 	}
-	return
+	defer func() {
+		if err == nil {
+			err = tx.Commit()
+		} else {
+			tx.Rollback()
+		}
+		if err == sql.ErrNoRows {
+			err = nil
+		}
+	}()
+
+	b.incrementIndex(tx)
+
+	rows, err := tx.Query(`SELECT "key" FROM "nodes" WHERE "expiration" < ` + b.dialect.now())
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var keys []string
+	var key string
+
+	for rows.Next() {
+		rows.Scan(&key)
+		if err != nil {
+			return err
+		}
+		keys = append(keys, key)
+	}
+
+	if len(keys) == 0 {
+		return sql.ErrNoRows
+	}
+
+	query := b.Query().Text(`DELETE FROM "nodes" WHERE "key" IN (`)
+	query.Param(keys[0])
+	for _, key := range keys[1:] {
+		query.Extend(", ", key)
+	}
+
+	query.Text(")")
+
+	for _, key := range keys {
+		query.Extend(` OR "key" LIKE `, key+"/%")
+	}
+
+	_, err = query.Exec(tx)
+	return err
 }
 
 // Get returns a node for the key
@@ -198,8 +249,8 @@ func (b *SqlBackend) SetTTL(key, value string, ttl int64, condition Condition) (
 	return b.set(key, value, false, &ttl, condition)
 }
 
-func (b *SqlBackend) MkDir(key string, condition Condition) (*models.Node, *models.Node, error) {
-	return b.set(key, "", true, nil, condition)
+func (b *SqlBackend) MkDir(key string, ttl *int64, condition Condition) (*models.Node, *models.Node, error) {
+	return b.set(key, "", true, ttl, condition)
 }
 
 func (b *SqlBackend) readOnlyError() error {

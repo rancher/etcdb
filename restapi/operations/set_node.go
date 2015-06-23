@@ -41,7 +41,7 @@ func (op *SetNode) Call() (interface{}, error) {
 	var err error
 
 	if params.Dir {
-		node, prevNode, err = op.Store.MkDir(params.Key, condition)
+		node, prevNode, err = op.Store.MkDir(params.Key, params.TTL, condition)
 	} else if params.TTL != nil {
 		node, prevNode, err = op.Store.SetTTL(params.Key, params.Value, *params.TTL, condition)
 	} else {
