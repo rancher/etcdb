@@ -109,8 +109,7 @@ func (b *SqlBackend) Get(key string, recursive bool) (node *models.Node, err err
 			query.Text(` WHERE path_depth = 1`)
 		}
 	} else {
-		query.Extend(` WHERE "key" = `, key, ` OR ("key" LIKE `)
-		b.dialect.concat(query, key, "/%")
+		query.Extend(` WHERE "key" = `, key, ` OR ("key" LIKE `, key+"/%")
 		if !recursive {
 			query.Extend(" AND path_depth = ", pathDepth(key)+1)
 		}
@@ -460,8 +459,7 @@ func (b *SqlBackend) RmDir(key string, recursive bool, condition Condition) (nod
 	}
 
 	query := b.Query().Extend(`
-		DELETE FROM nodes WHERE "key" = `, key, ` OR "key" LIKE `)
-	b.dialect.concat(query, key, "/%")
+		DELETE FROM nodes WHERE "key" = `, key, ` OR "key" LIKE `, key+"/%")
 	res, err := query.Exec(tx)
 	if err != nil {
 		return nil, 0, err
