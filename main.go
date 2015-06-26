@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -50,7 +51,7 @@ func main() {
 		var op operations.Operation
 		switch r.Method {
 		case "GET":
-			op = &operations.GetNode{Store: store}
+			op = &operations.GetNode{Store: store, WaitPollPeriod: time.Second}
 		case "PUT":
 			op = &operations.SetNode{Store: store}
 		case "POST":

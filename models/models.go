@@ -19,9 +19,9 @@ type ActionUpdate struct {
 type Node struct {
 	Key           string     `json:"key"`
 	Value         string     `json:"value"`
-	CreatedIndex  int64      `json:"createdIndex"`
-	ModifiedIndex int64      `json:"modifiedIndex"`
-	Dir           bool       `json:"dir"`
+	CreatedIndex  int64      `json:"createdIndex,omitempty"`
+	ModifiedIndex int64      `json:"modifiedIndex,omitempty"`
+	Dir           bool       `json:"dir,omitempty"`
 	TTL           *int64     `json:"ttl,omitempty"`
 	Expiration    *time.Time `json:"expiration,omitempty"`
 	Nodes         []*Node    `json:"nodes,omitempty"`
