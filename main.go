@@ -47,7 +47,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "4001"
+		port = "2379"
 	}
 
 	host := os.Getenv("HOST")
