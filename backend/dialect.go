@@ -4,13 +4,14 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/lib/pq"
 )
 
 type dbDialect interface {
-	init(*sql.DB) error
+	Open(driver, dataSource string) (*sql.DB, error)
 	tableDefinitions() []string
 	nameParam([]interface{}) string
 	incrementIndex(Querier) (int64, error)
@@ -22,9 +23,13 @@ type dbDialect interface {
 
 type mysqlDialect struct{}
 
-func (d mysqlDialect) init(db *sql.DB) error {
-	_, err := db.Exec("SET sql_mode='ANSI_QUOTES'")
-	return err
+func (d mysqlDialect) Open(driver, dataSource string) (*sql.DB, error) {
+	sep := "?"
+	if strings.ContainsRune(dataSource, '?') {
+		sep = "&"
+	}
+	dataSource = dataSource + sep + "sql_mode=ANSI_QUOTES"
+	return sql.Open(driver, dataSource)
 }
 
 func (d mysqlDialect) tableDefinitions() []string {
@@ -33,11 +38,12 @@ func (d mysqlDialect) tableDefinitions() []string {
 			"key" varchar(255),
 			"created" bigint NOT NULL,
 			"modified" bigint NOT NULL,
+			"deleted" bigint NOT NULL DEFAULT 0,
 			"value" text NOT NULL DEFAULT '',
 			"expiration" timestamp NULL,
 			"dir" boolean NOT NULL DEFAULT 0,
 			"path_depth" integer,
-			PRIMARY KEY ("key")
+			PRIMARY KEY ("key", "deleted")
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8`,
 
 		`CREATE INDEX "nodes_expiration" ON "nodes" ("expiration")`,
@@ -45,6 +51,14 @@ func (d mysqlDialect) tableDefinitions() []string {
 		`CREATE TABLE "index" (
 			"index" bigint,
 			PRIMARY KEY ("index")
+		) ENGINE=InnoDB`,
+
+		`CREATE TABLE "changes" (
+			"index" bigint,
+			"key" varchar(255) NOT NULL,
+			"action" varchar(32) NOT NULL,
+			"prev_node_modified" bigint,
+			PRIMARY KEY ("index", "key")
 		) ENGINE=InnoDB`,
 	}
 }
@@ -87,8 +101,8 @@ func (d mysqlDialect) isDuplicateKeyError(err error) bool {
 
 type postgresDialect struct{}
 
-func (d postgresDialect) init(db *sql.DB) error {
-	return nil
+func (d postgresDialect) Open(driver, dataSource string) (*sql.DB, error) {
+	return sql.Open(driver, dataSource)
 }
 
 func (d postgresDialect) tableDefinitions() []string {
@@ -97,11 +111,12 @@ func (d postgresDialect) tableDefinitions() []string {
 			"key" varchar(2048),
 			"created" bigint NOT NULL,
 			"modified" bigint NOT NULL,
+			"deleted" bigint DEFAULT 0,
 			"value" text NOT NULL DEFAULT '',
 			"expiration" timestamp,
 			"dir" boolean NOT NULL DEFAULT 'false',
 			"path_depth" integer,
-			PRIMARY KEY ("key")
+			PRIMARY KEY ("key", "deleted")
 		)`,
 
 		`CREATE INDEX ON "nodes" ("expiration")`,
@@ -109,6 +124,14 @@ func (d postgresDialect) tableDefinitions() []string {
 		`CREATE TABLE "index" (
 			"index" bigint,
 			PRIMARY KEY ("index")
+		)`,
+
+		`CREATE TABLE "changes" (
+			"index" bigint,
+			"key" varchar(2048) NOT NULL,
+			"action" varchar(32) NOT NULL,
+			"prev_node_modified" bigint,
+			PRIMARY KEY ("index", "key")
 		)`,
 	}
 }

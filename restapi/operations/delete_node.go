@@ -21,7 +21,7 @@ func (op *DeleteNode) Params() interface{} {
 }
 
 func (op *DeleteNode) Call() (interface{}, error) {
-	var condition backend.Condition
+	var condition backend.DeleteCondition
 	params := op.params
 
 	switch {
@@ -33,13 +33,21 @@ func (op *DeleteNode) Call() (interface{}, error) {
 		condition = backend.Always
 	}
 
-	node, index, err := op.Store.Delete(params.Key, condition)
+	var node *models.Node
+	var index int64
+	var err error
+
+	if params.Dir || params.Recursive {
+		node, index, err = op.Store.RmDir(params.Key, params.Recursive, condition)
+	} else {
+		node, index, err = op.Store.Delete(params.Key, condition)
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	return &models.ActionUpdate{
-		Action: "delete",
+		Action: condition.DeleteActionName(),
 		Node: models.Node{
 			Key:           params.Key,
 			CreatedIndex:  node.CreatedIndex,

@@ -23,7 +23,7 @@ func (op *SetNode) Params() interface{} {
 }
 
 func (op *SetNode) Call() (interface{}, error) {
-	var condition backend.Condition
+	var condition backend.SetCondition
 	params := op.params
 
 	switch {
@@ -53,7 +53,7 @@ func (op *SetNode) Call() (interface{}, error) {
 	}
 
 	return &models.ActionUpdate{
-		Action:   "set",
+		Action:   condition.SetActionName(),
 		Node:     *node,
 		PrevNode: prevNode,
 	}, nil

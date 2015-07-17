@@ -10,6 +10,10 @@ import (
 	"github.com/rancher/etcdb/models"
 )
 
+// MaxChanges is the maximum rows to keep in the changes table, and the
+// corresponding previous versions of modified or deleted nodes.
+const MaxChanges = 1000
+
 // SqlBackend SQL implementation
 type SqlBackend struct {
 	db      *sql.DB
@@ -28,17 +32,11 @@ func New(driver, dataSource string) (*SqlBackend, error) {
 		return nil, fmt.Errorf("Unrecognized database driver %s, should be 'mysql' or 'postgres'", driver)
 	}
 
-	db, err := sql.Open(driver, dataSource)
+	db, err := dialect.Open(driver, dataSource)
 	if err != nil {
 		return nil, err
 	}
 	backend := &SqlBackend{db, dialect}
-	err = backend.dialect.init(db)
-	if err != nil {
-		backend.Close()
-		return nil, err
-	}
-
 	return backend, nil
 }
 
@@ -62,6 +60,7 @@ func (b *SqlBackend) dropSchema() error {
 	return b.runQueries(
 		`DROP TABLE IF EXISTS "nodes"`,
 		`DROP TABLE IF EXISTS "index"`,
+		`DROP TABLE IF EXISTS "changes"`,
 	)
 }
 
@@ -79,6 +78,7 @@ func (b *SqlBackend) Query() *Query {
 func (b *SqlBackend) Begin() (tx *sql.Tx, err error) {
 	err = b.purgeExpired()
 	if err != nil {
+		log.Println("error expiring:", err)
 		return
 	}
 
@@ -101,40 +101,53 @@ func (b *SqlBackend) purgeExpired() (err error) {
 		}
 	}()
 
-	b.incrementIndex(tx)
+	index, err := b.incrementIndex(tx)
+	if err != nil {
+		return
+	}
 
-	rows, err := tx.Query(`SELECT "key" FROM "nodes" WHERE "expiration" < ` + b.dialect.now())
+	rows, err := tx.Query(`SELECT "key", "modified" FROM "nodes" WHERE "deleted" = 0 AND "expiration" < ` + b.dialect.now())
 	if err != nil {
 		return
 	}
 	defer rows.Close()
 
-	var keys []string
-	var key string
+	var nodes []*models.Node
 
 	for rows.Next() {
-		rows.Scan(&key)
+		var node models.Node
+		err = rows.Scan(&node.Key, &node.ModifiedIndex)
 		if err != nil {
 			return err
 		}
-		keys = append(keys, key)
+		nodes = append(nodes, &node)
 	}
 
-	if len(keys) == 0 {
+	if len(nodes) == 0 {
 		return sql.ErrNoRows
 	}
 
-	query := b.Query().Text(`DELETE FROM "nodes" WHERE "key" IN (`)
-	query.Param(keys[0])
-	for _, key := range keys[1:] {
-		query.Extend(", ", key)
+	for _, node := range nodes {
+		err = b.recordChange(tx, index, "expire", node.Key, node)
+		if err != nil {
+			return err
+		}
+	}
+
+	query := b.Query().Extend(`UPDATE "nodes" SET deleted = `, index,
+		` WHERE deleted = 0 AND ("key" IN (`)
+	query.Param(nodes[0].Key)
+	for _, node := range nodes[1:] {
+		query.Extend(", ", node.Key)
 	}
 
 	query.Text(")")
 
-	for _, key := range keys {
-		query.Extend(` OR "key" LIKE `, key+"/%")
+	for _, node := range nodes {
+		query.Extend(` OR "key" LIKE `, node.Key+"/%")
 	}
+
+	query.Text(")")
 
 	_, err = query.Exec(tx)
 	return err
@@ -157,14 +170,14 @@ func (b *SqlBackend) Get(key string, recursive bool) (node *models.Node, err err
 	query := b.queryNode()
 	if key == "/" {
 		if !recursive {
-			query.Text(` WHERE path_depth = 1`)
+			query.Text(` AND path_depth = 1`)
 		}
 	} else {
-		query.Extend(` WHERE "key" = `, key, ` OR ("key" LIKE `, key+"/%")
+		query.Extend(` AND ("key" = `, key, ` OR ("key" LIKE `, key+"/%")
 		if !recursive {
 			query.Extend(" AND path_depth = ", pathDepth(key)+1)
 		}
-		query.Text(")")
+		query.Text("))")
 	}
 	rows, err := query.Query(tx)
 	if err != nil {
@@ -225,15 +238,19 @@ func scanNode(scanner scannable) (*models.Node, error) {
 	return &node, nil
 }
 
-func (b *SqlBackend) queryNode() *Query {
+func (b *SqlBackend) queryNodeWithDeleted() *Query {
 	return b.Query().Text(`
 		SELECT "key", "created", "modified", "value", "dir", "expiration",
-		`).Text(b.dialect.ttl()).Extend(`
+		`).Text(b.dialect.ttl()).Text(`
 		FROM "nodes"`)
 }
 
+func (b *SqlBackend) queryNode() *Query {
+	return b.queryNodeWithDeleted().Text(` WHERE "deleted" = 0`)
+}
+
 func (b *SqlBackend) getOne(tx *sql.Tx, key string) (*models.Node, error) {
-	node, err := scanNode(b.queryNode().Extend(` WHERE "key" = `, key).QueryRow(tx))
+	node, err := scanNode(b.queryNode().Extend(` AND "key" = `, key).QueryRow(tx))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -241,15 +258,15 @@ func (b *SqlBackend) getOne(tx *sql.Tx, key string) (*models.Node, error) {
 }
 
 // Set sets the value for a key
-func (b *SqlBackend) Set(key, value string, condition Condition) (*models.Node, *models.Node, error) {
+func (b *SqlBackend) Set(key, value string, condition SetCondition) (*models.Node, *models.Node, error) {
 	return b.set(key, value, false, nil, condition)
 }
 
-func (b *SqlBackend) SetTTL(key, value string, ttl int64, condition Condition) (*models.Node, *models.Node, error) {
+func (b *SqlBackend) SetTTL(key, value string, ttl int64, condition SetCondition) (*models.Node, *models.Node, error) {
 	return b.set(key, value, false, &ttl, condition)
 }
 
-func (b *SqlBackend) MkDir(key string, ttl *int64, condition Condition) (*models.Node, *models.Node, error) {
+func (b *SqlBackend) MkDir(key string, ttl *int64, condition SetCondition) (*models.Node, *models.Node, error) {
 	return b.set(key, "", true, ttl, condition)
 }
 
@@ -261,7 +278,7 @@ func (b *SqlBackend) readOnlyError() error {
 	return models.RootReadOnly(index)
 }
 
-func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Condition) (node *models.Node, prevNode *models.Node, err error) {
+func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition SetCondition) (node *models.Node, prevNode *models.Node, err error) {
 	if key == "/" {
 		return nil, nil, b.readOnlyError()
 	}
@@ -295,7 +312,6 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 	}
 
 	if prevNode != nil && prevNode.Dir {
-		// XXX is this index the new, or previous index?
 		return nil, nil, models.NotAFile(key, prevIndex)
 	}
 
@@ -304,24 +320,18 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 		return nil, nil, err
 	}
 
-	var query *Query
-
-	if prevNode == nil {
-		query = b.insertQuery(key, value, dir, index, ttl)
-	} else {
-		query = b.Query().Extend(`UPDATE nodes SET "value" = `, value, `, dir = `, dir,
-			`, modified = `, index, `, path_depth = `, pathDepth(key))
-		if ttl == nil {
-			query.Text(
-				`, expiration = null`,
-			)
-		} else {
-			query.Text(`, expiration = `)
-			b.dialect.expiration(query, *ttl)
+	if prevNode != nil {
+		_, err = b.Query().Extend(
+			`UPDATE nodes SET "deleted" = `, index,
+			` WHERE "key" = `, key,
+			` AND "modified" = `, prevNode.ModifiedIndex,
+		).Exec(tx)
+		if err != nil {
+			return nil, nil, err
 		}
-		query.Extend(` WHERE "key" = `, key)
 	}
-	_, err = query.Exec(tx)
+
+	_, err = b.insertQuery(key, value, dir, index, ttl).Exec(tx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -331,7 +341,35 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition Cond
 		return nil, nil, err
 	}
 
+	err = b.recordChange(tx, index, condition.SetActionName(), key, prevNode)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	return node, prevNode, nil
+}
+
+func (b *SqlBackend) recordChange(db Querier, index int64, action, key string, prevNode *models.Node) (err error) {
+	query := b.Query().Extend(`INSERT INTO changes
+		("index", "key", "action", "prev_node_modified") VALUES (`,
+		index, `, `, key, `,`, action)
+	if prevNode == nil {
+		query.Text(`, null)`)
+	} else {
+		query.Extend(`, `, prevNode.ModifiedIndex, `)`)
+	}
+	_, err = query.Exec(db)
+	if err != nil {
+		return
+	}
+
+	_, err = b.Query().Extend(`DELETE FROM changes WHERE "index" < `, index-MaxChanges).Exec(db)
+	if err != nil {
+		return
+	}
+
+	_, err = b.Query().Extend(`DELETE FROM "nodes" WHERE "deleted" <> 0 AND "deleted" < `, index-MaxChanges).Exec(db)
+	return
 }
 
 func (b *SqlBackend) insertQuery(key, value string, dir bool, index int64, ttl *int64) *Query {
@@ -368,7 +406,7 @@ func (b *SqlBackend) mkdirs(tx *sql.Tx, path string, index int64) error {
 		}
 		if b.dialect.isDuplicateKeyError(err) {
 			var existingIsDir bool
-			err := b.Query().Extend(`SELECT dir FROM nodes WHERE "key" = `, path).QueryRow(tx).Scan(&existingIsDir)
+			err := b.Query().Extend(`SELECT dir FROM nodes WHERE "deleted" = 0 AND "key" = `, path).QueryRow(tx).Scan(&existingIsDir)
 			if err != nil {
 				return err
 			}
@@ -416,11 +454,16 @@ func (b *SqlBackend) CreateInOrder(key, value string, ttl *int64) (node *models.
 		return nil, err
 	}
 
+	err = b.recordChange(tx, index, "create", key, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	return node, nil
 }
 
 // Delete removes the key
-func (b *SqlBackend) Delete(key string, condition Condition) (node *models.Node, index int64, err error) {
+func (b *SqlBackend) Delete(key string, condition DeleteCondition) (node *models.Node, index int64, err error) {
 	if key == "/" {
 		return nil, 0, b.readOnlyError()
 	}
@@ -461,8 +504,13 @@ func (b *SqlBackend) Delete(key string, condition Condition) (node *models.Node,
 	}
 
 	_, err = b.Query().Extend(`
-		DELETE FROM nodes WHERE "key" =
-		`, key).Exec(tx)
+		UPDATE "nodes" SET "deleted" = `, index,
+		` WHERE "key" = `, key, ` AND "deleted" = 0`).Exec(tx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = b.recordChange(tx, index, condition.DeleteActionName(), key, node)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -471,7 +519,7 @@ func (b *SqlBackend) Delete(key string, condition Condition) (node *models.Node,
 }
 
 // RmDir removes the key for directories
-func (b *SqlBackend) RmDir(key string, recursive bool, condition Condition) (node *models.Node, index int64, err error) {
+func (b *SqlBackend) RmDir(key string, recursive bool, condition DeleteCondition) (node *models.Node, index int64, err error) {
 	if key == "/" {
 		return nil, 0, b.readOnlyError()
 	}
@@ -510,7 +558,8 @@ func (b *SqlBackend) RmDir(key string, recursive bool, condition Condition) (nod
 	}
 
 	query := b.Query().Extend(`
-		DELETE FROM nodes WHERE "key" = `, key, ` OR "key" LIKE `, key+"/%")
+		UPDATE nodes SET deleted = `, index,
+		` WHERE deleted = 0 AND ("key" = `, key, ` OR "key" LIKE `, key+"/%", `)`)
 	res, err := query.Exec(tx)
 	if err != nil {
 		return nil, 0, err
@@ -524,6 +573,11 @@ func (b *SqlBackend) RmDir(key string, recursive bool, condition Condition) (nod
 		if rowsDeleted > 1 {
 			return nil, 0, models.DirectoryNotEmpty(key, prevIndex)
 		}
+	}
+
+	err = b.recordChange(tx, index, condition.DeleteActionName(), key, node)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	return node, index, nil

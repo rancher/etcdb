@@ -76,3 +76,8 @@ func InvalidField(cause string) Error {
 func RaftInternalError(cause string) Error {
 	return Error{300, "Raft Internal Error", cause, 0}
 }
+
+func EventIndexCleared(oldest, requested, index int64) Error {
+	cause := fmt.Sprintf("the requested history has been cleared [%v/%v]", oldest, requested)
+	return Error{401, "The event in requested index is outdated and cleared", cause, index}
+}

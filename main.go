@@ -20,6 +20,7 @@ import (
 )
 
 var initDb = flag.Bool("init-db", false, "Initialize the DB schema and exit.")
+var watchPoll = flag.Duration("watch-poll", 1*time.Second, "Poll rate for watches.")
 
 func main() {
 	flag.Usage = func() {
@@ -27,7 +28,7 @@ func main() {
 		cmd := filepath.Base(executable)
 
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n\n", executable)
-		fmt.Fprintf(os.Stderr, "  %s [-init-db] <postgres|mysql> <datasource>\n\n", cmd)
+		fmt.Fprintf(os.Stderr, "  %s [-init-db] [-watch-poll=<duration>] <postgres|mysql> <datasource>\n\n", cmd)
 		flag.PrintDefaults()
 
 		fmt.Fprintln(os.Stderr, "\n  Examples:")
@@ -73,6 +74,8 @@ func main() {
 		return
 	}
 
+	cw := backend.Watch(store, *watchPoll)
+
 	listener, err := net.Listen("tcp", host+":"+port)
 	if err != nil {
 		log.Fatalln(err)
@@ -94,7 +97,7 @@ func main() {
 		var op operations.Operation
 		switch r.Method {
 		case "GET":
-			op = &operations.GetNode{Store: store, WaitPollPeriod: time.Second}
+			op = &operations.GetNode{Store: store, Watcher: cw}
 		case "PUT":
 			op = &operations.SetNode{Store: store}
 		case "POST":
