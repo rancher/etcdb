@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/rancherio/etcdb/models"
+	"github.com/rancher/etcdb/models"
 )
 
 // SqlBackend SQL implementation

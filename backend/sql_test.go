@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rancherio/etcdb/models"
+	"github.com/rancher/etcdb/models"
 )
 
 func TestMain(m *testing.M) {

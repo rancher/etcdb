@@ -13,10 +13,10 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/rancherio/etcdb/backend"
-	"github.com/rancherio/etcdb/models"
-	"github.com/rancherio/etcdb/restapi"
-	"github.com/rancherio/etcdb/restapi/operations"
+	"github.com/rancher/etcdb/backend"
+	"github.com/rancher/etcdb/models"
+	"github.com/rancher/etcdb/restapi"
+	"github.com/rancher/etcdb/restapi/operations"
 )
 
 var initDb = flag.Bool("init-db", false, "Initialize the DB schema and exit.")

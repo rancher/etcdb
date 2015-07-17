@@ -1,6 +1,6 @@
 package backend
 
-import "github.com/rancherio/etcdb/models"
+import "github.com/rancher/etcdb/models"
 
 type Condition interface {
 	Check(key string, index int64, node *models.Node) error

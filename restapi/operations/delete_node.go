@@ -1,8 +1,8 @@
 package operations
 
 import (
-	"github.com/rancherio/etcdb/backend"
-	"github.com/rancherio/etcdb/models"
+	"github.com/rancher/etcdb/backend"
+	"github.com/rancher/etcdb/models"
 )
 
 type DeleteNode struct {
