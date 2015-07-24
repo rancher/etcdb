@@ -28,6 +28,10 @@ func (d mysqlDialect) Open(driver, dataSource string) (*sql.DB, error) {
 	if strings.ContainsRune(dataSource, '?') {
 		sep = "&"
 	}
+	// Enable the ANSI_QUOTES mode so that MySQL allows double-quotes around
+	// column or table names to escape reserved words instead of backticks.
+	// This way the same escaping syntax works consistently across MySQL and
+	// Postgres.
 	dataSource = dataSource + sep + "sql_mode=ANSI_QUOTES"
 	return sql.Open(driver, dataSource)
 }
