@@ -7,8 +7,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -19,8 +21,61 @@ import (
 	"github.com/rancher/etcdb/restapi/operations"
 )
 
+type UrlsValue []url.URL
+
+func (uv *UrlsValue) Set(s string) error {
+	vals := strings.Split(s, ",")
+	urls := make([]url.URL, len(vals))
+
+	for i, val := range vals {
+		val = strings.TrimSpace(val)
+		u, err := url.Parse(val)
+		if err != nil {
+			return err
+		}
+		if u.Scheme != "http" {
+			return fmt.Errorf("URLs must use the http scheme: %s", val)
+		}
+		if u.Path != "" {
+			return fmt.Errorf("URLs cannot include a path: %s", val)
+		}
+		if _, _, err := net.SplitHostPort(u.Host); err != nil {
+			return fmt.Errorf("URLs must include a port: %s", val)
+		}
+
+		urls[i] = *u
+	}
+
+	*uv = urls
+	return nil
+}
+
+func (uv *UrlsValue) String() string {
+	// for flags, join with just comma since spaces are less shell-friendly
+	return uv.Join(",")
+}
+
+func (uv *UrlsValue) Join(sep string) string {
+	vals := make([]string, len(*uv))
+	for i, u := range *uv {
+		vals[i] = u.String()
+	}
+	return strings.Join(vals, sep)
+}
+
+func UrlsFlag(name, value, usage string) *UrlsValue {
+	urls := &UrlsValue{}
+	urls.Set(value)
+	flag.Var(urls, name, usage)
+	return urls
+}
+
+var defaultClientUrls = "http://localhost:2379,http://localhost:4001"
+
 var initDb = flag.Bool("init-db", false, "Initialize the DB schema and exit.")
 var watchPoll = flag.Duration("watch-poll", 1*time.Second, "Poll rate for watches.")
+var listenClientUrls = UrlsFlag("listen-client-urls", defaultClientUrls, "List of URLs to listen on for client traffic.")
+var advertiseClientUrls = UrlsFlag("advertise-client-urls", defaultClientUrls, "List of public URLs available to access the client.")
 
 func main() {
 	flag.Usage = func() {
@@ -28,7 +83,7 @@ func main() {
 		cmd := filepath.Base(executable)
 
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n\n", executable)
-		fmt.Fprintf(os.Stderr, "  %s [-init-db] [-watch-poll=<duration>] <postgres|mysql> <datasource>\n\n", cmd)
+		fmt.Fprintf(os.Stderr, "  %s [options] <postgres|mysql> <datasource>\n\n", cmd)
 		flag.PrintDefaults()
 
 		fmt.Fprintln(os.Stderr, "\n  Examples:")
@@ -44,16 +99,6 @@ func main() {
 	if flag.NArg() != 2 {
 		flag.Usage()
 		os.Exit(2)
-	}
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "2379"
-	}
-
-	host := os.Getenv("HOST")
-	if host == "" {
-		host = "localhost"
 	}
 
 	dbDriver := flag.Arg(0)
@@ -76,21 +121,15 @@ func main() {
 
 	cw := backend.Watch(store, *watchPoll)
 
-	listener, err := net.Listen("tcp", host+":"+port)
-	if err != nil {
-		log.Fatalln(err)
-	}
-
-	fmt.Printf("serving etcd at http://%s\n", listener.Addr())
-
 	r := mux.NewRouter()
 
 	r.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "2")
+		fmt.Fprint(w, "2")
 	})
 
 	r.HandleFunc("/v2/machines", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "http://%s", listener.Addr())
+		// for etcdctl it expects a comma and space separator instead of comma-only
+		fmt.Fprint(w, advertiseClientUrls.Join(", "))
 	})
 
 	r.HandleFunc("/v2/keys{key:/.*}", func(rw http.ResponseWriter, r *http.Request) {
@@ -127,7 +166,6 @@ func main() {
 		}()
 
 		js, _ := json.Marshal(res)
-		// FIXME handle serialization errors?
 
 		rw.Header().Set("Content-Type", "application/json")
 
@@ -155,7 +193,18 @@ func main() {
 		fmt.Fprintln(rw, string(js))
 	})
 
-	if err := http.Serve(listener, r); err != nil {
+	log.Println("etcdb: advertise client URLs", advertiseClientUrls.String())
+
+	listenErr := make(chan error)
+
+	for _, u := range *listenClientUrls {
+		go func(u url.URL) {
+			log.Println("etcdb: listening for client requests on", u.String())
+			listenErr <- http.ListenAndServe(u.Host, r)
+		}(u)
+	}
+
+	if err := <-listenErr; err != nil {
 		log.Fatalln(err)
 	}
 }
