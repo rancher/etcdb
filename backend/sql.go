@@ -323,8 +323,7 @@ func (b *SqlBackend) set(key, value string, dir bool, ttl *int64, condition SetC
 	if prevNode != nil {
 		_, err = b.Query().Extend(
 			`UPDATE nodes SET "deleted" = `, index,
-			` WHERE "key" = `, key,
-			` AND "modified" = `, prevNode.ModifiedIndex,
+			` WHERE "deleted" = 0 AND "key" = `, key,
 		).Exec(tx)
 		if err != nil {
 			return nil, nil, err
@@ -368,7 +367,7 @@ func (b *SqlBackend) recordChange(db Querier, index int64, action, key string, p
 		return
 	}
 
-	_, err = b.Query().Extend(`DELETE FROM "nodes" WHERE "deleted" <> 0 AND "deleted" < `, index-MaxChanges).Exec(db)
+	_, err = b.Query().Extend(`DELETE FROM "nodes" WHERE "deleted" > 0 AND "deleted" < `, index-MaxChanges).Exec(db)
 	return
 }
 

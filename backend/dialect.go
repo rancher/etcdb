@@ -47,10 +47,12 @@ func (d mysqlDialect) tableDefinitions() []string {
 			"expiration" timestamp NULL,
 			"dir" boolean NOT NULL DEFAULT 0,
 			"path_depth" integer,
-			PRIMARY KEY ("key", "deleted")
+			PRIMARY KEY ("deleted", "key")
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8`,
 
-		`CREATE INDEX "nodes_expiration" ON "nodes" ("expiration")`,
+		`CREATE INDEX "nodes_key_modified_idx" ON "nodes" ("key", "modified")`,
+		`CREATE INDEX "nodes_deleted_path_depth_idx" ON "nodes" ("deleted", "path_depth")`,
+		`CREATE INDEX "nodes_deleted_expiration_idx" ON "nodes" ("deleted", "expiration")`,
 
 		`CREATE TABLE "index" (
 			"index" bigint,
@@ -63,7 +65,7 @@ func (d mysqlDialect) tableDefinitions() []string {
 			"action" varchar(32) NOT NULL,
 			"prev_node_modified" bigint,
 			PRIMARY KEY ("index", "key")
-		) ENGINE=InnoDB`,
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8`,
 	}
 }
 
@@ -120,10 +122,16 @@ func (d postgresDialect) tableDefinitions() []string {
 			"expiration" timestamp,
 			"dir" boolean NOT NULL DEFAULT 'false',
 			"path_depth" integer,
-			PRIMARY KEY ("key", "deleted")
+			PRIMARY KEY ("deleted", "key")
 		)`,
 
-		`CREATE INDEX ON "nodes" ("expiration")`,
+		// need varchar_pattern_ops index to optimize LIKE queries
+		// but not allowed in the primary key
+		`CREATE INDEX ON "nodes" ("deleted", "key" varchar_pattern_ops)`,
+
+		`CREATE INDEX ON "nodes" ("key", "modified")`,
+		`CREATE INDEX ON "nodes" ("deleted", "path_depth")`,
+		`CREATE INDEX ON "nodes" ("deleted", "expiration")`,
 
 		`CREATE TABLE "index" (
 			"index" bigint,
@@ -137,6 +145,12 @@ func (d postgresDialect) tableDefinitions() []string {
 			"prev_node_modified" bigint,
 			PRIMARY KEY ("index", "key")
 		)`,
+
+		// Postgres isn't using the primary key for the query to refresh
+		// the changes cache:
+		// WHERE "index" > ? ORDER BY "index"
+		// so need another index just on "index" column
+		`CREATE INDEX ON "changes" ("index")`,
 	}
 }
 
