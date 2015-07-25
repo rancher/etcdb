@@ -119,7 +119,12 @@ func (cw *ChangeWatcher) refresh() {
 
 	cw.lastIndex = cw.changes.Last().Index
 
-	for i := cw.changes.Size - newCount; i < cw.changes.Size; i++ {
+	i := 0
+	if newCount < cw.changes.Size {
+		i = cw.changes.Size - newCount
+	}
+
+	for ; i < cw.changes.Size; i++ {
 		c := cw.changes.Item(i)
 		for w := range cw.watches {
 			cw.checkChange(c, w)

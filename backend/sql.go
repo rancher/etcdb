@@ -106,7 +106,9 @@ func (b *SqlBackend) purgeExpired() (err error) {
 		return
 	}
 
-	rows, err := tx.Query(`SELECT "key", "modified" FROM "nodes" WHERE "deleted" = 0 AND "expiration" < ` + b.dialect.now())
+	rows, err := tx.Query(`SELECT "key", "modified" FROM "nodes"
+		WHERE "deleted" = 0 AND "expiration" < ` + b.dialect.now() + `
+		ORDER BY "expiration"`)
 	if err != nil {
 		return
 	}
@@ -127,29 +129,29 @@ func (b *SqlBackend) purgeExpired() (err error) {
 		return sql.ErrNoRows
 	}
 
+	expirationIndex := index
+
 	for _, node := range nodes {
-		err = b.recordChange(tx, index, "expire", node.Key, node)
+		err = b.recordChange(tx, expirationIndex, "expire", node.Key, node)
 		if err != nil {
 			return err
 		}
+
+		query := b.Query().Extend(`UPDATE nodes SET deleted = `, expirationIndex,
+			` WHERE deleted = 0 AND ("key" = `, node.Key, ` OR "key" LIKE `, node.Key+"/%", `)`)
+		_, err = query.Exec(tx)
+		if err != nil {
+			return err
+		}
+
+		expirationIndex++
 	}
 
-	query := b.Query().Extend(`UPDATE "nodes" SET deleted = `, index,
-		` WHERE deleted = 0 AND ("key" IN (`)
-	query.Param(nodes[0].Key)
-	for _, node := range nodes[1:] {
-		query.Extend(", ", node.Key)
-	}
+	// undo last increment to match the final index value used
+	expirationIndex--
 
-	query.Text(")")
+	_, err = b.Query().Extend(`UPDATE "index" SET "index" = `, expirationIndex).Exec(tx)
 
-	for _, node := range nodes {
-		query.Extend(` OR "key" LIKE `, node.Key+"/%")
-	}
-
-	query.Text(")")
-
-	_, err = query.Exec(tx)
 	return err
 }
 
